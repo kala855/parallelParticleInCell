@@ -1,0 +1,195 @@
+/////////////////////////// funcion para calcular numero de particulas en cada celda /////////////////////////////////
+int funcionPeso2(float limiteInferior, float limiteSuperior, float x){
+	if((x >= limiteInferior) && (x < limiteSuperior)){
+		return 1;
+	}
+	else{
+		return 0;
+	}
+}
+
+__kernel void funcionNumeroParticulasCelda(float tamanoCelda, int numeroMallas, int numeroParticulas, __global float *xIon, __global float *xElectron, __global float *numeroIonesCelda,__global float *numeroElectronesCelda ){
+
+	float limiteSuperior, limiteInferior;
+	limiteSuperior = 0;
+	limiteInferior = 0;
+	int p = 0;
+	uint celda = get_global_id(0);
+	numeroIonesCelda[celda] = 0;
+	numeroElectronesCelda[celda] = 0;
+	limiteInferior = celda * tamanoCelda;
+	limiteSuperior = limiteInferior + tamanoCelda;			
+	for(p = 0; p < numeroParticulas; p++){			
+	 	numeroIonesCelda[celda] = numeroIonesCelda[celda] + funcionPeso2(limiteInferior,limiteSuperior,xIon[p]);
+	 	numeroElectronesCelda[celda] = numeroElectronesCelda[celda] + funcionPeso2(limiteInferior, limiteSuperior,xElectron[p]);
+	
+	}
+}
+
+//////////////////////// funcion que calcula la densidad de carga [rho]  ///////////////////////////////////////////////////////
+
+__kernel void funcionRho(float cargaIon, float tamanoCelda,__global float *numeroIonesCelda,__global float *numeroElectronesCelda,__global float *rho){
+	uint celda= get_global_id(0);
+	rho[celda] = 0;
+	rho[celda] = (cargaIon*(numeroIonesCelda[celda] - numeroElectronesCelda[celda]))/tamanoCelda;
+	
+}
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void solveMatrix (int numberEquations, __global float *subDiagonal, __global float *mainDiagonal,__global float *supDiagonal,
+					__global float *rhoPoisson,__global float *phi){
+    /**
+     * numberEquations - number of equations
+     * subDiagonal - sub-diagonal (means it is the diagonal below the main diagonal) -- indexed from 1..n-1
+     * mainDiagonal - the main diagonal
+     * supDiagonal - sup-diagonal (means it is the diagonal above the main diagonal) -- indexed from 0..n-2
+     * vector - right part
+     * answer - the answer
+     */
+
+     //Codigo Adicionado por yensy y john
+     int indiceMallas;
+     for(indiceMallas=0; indiceMallas < numberEquations  ; indiceMallas++ ){
+		supDiagonal[indiceMallas] = 1;
+		subDiagonal[indiceMallas] = 1;
+		mainDiagonal[indiceMallas] = -2;
+	}
+    for (int i = 1; i < numberEquations; i++){
+    	float m = subDiagonal[i]/mainDiagonal[i-1];
+		mainDiagonal[i] = mainDiagonal[i] - m*supDiagonal[i-1];
+		rhoPoisson[i] = rhoPoisson[i] - m*rhoPoisson[i-1];
+    }
+
+    phi[numberEquations] = rhoPoisson[numberEquations-1]/mainDiagonal[numberEquations-1];
+
+    for (int i = numberEquations - 2; i >= 0; i--)
+    	phi[i+1]=(rhoPoisson[i]-supDiagonal[i]*phi[i+2])/mainDiagonal[i];
+}
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+__kernel void calculoPotencialElectroEstatico(float permitividadElectrica, int numeroMallas, float tamanoCelda, __global float *rho, 
+												__global float *rhoPoisson,__global float *diagonalInferior, __global float *diagonalSuperior, 
+												__global float *diagonalPrincipal, __global float *phi){	
+	uint i = get_global_id(0);
+	rhoPoisson[i-1]=(-(rho[i]/permitividadElectrica))*tamanoCelda*tamanoCelda;
+	barrier(CLK_GLOBAL_MEM_FENCE);
+	if(i == 0){	
+		solveMatrix (numeroMallas-2, diagonalInferior, diagonalPrincipal, diagonalSuperior, rhoPoisson, phi);	
+		phi[0] = 0;
+		phi[numeroMallas -1] = 0;
+	}
+}
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////CampoElectrico///////////////////////////////////////////////////////////////
+__kernel void calculoCampoElectrico( float tamanoCelda, int numeroMallas, __global float *phi, __global float *campoElectrico){
+	uint i = get_global_id(0);
+	if((i>0) && (i < (numeroMallas - 1))){
+		campoElectrico[i] = (phi[i-1]-phi[i+1])/(tamanoCelda);
+	}
+	if (i == 0){
+		campoElectrico[i]=(phi[numeroMallas - 1]-phi[1])/(tamanoCelda);
+	}
+	if(i == numeroMallas - 1){
+		campoElectrico[i] = (phi[i-1]-phi[0])/(tamanoCelda);
+	}
+
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+////////////////////////////////////////FuerzaParticulaIon////////////////////////////////////////////////////////////////////////
+__kernel void calculoFuerzaParticulaIon(int numeroMallas, float tamanoCelda, float xita, __global float *campoElectrico, 
+										__global float *xIon, __global float *campoElectricoIon, __global float *fuerzaParticulaIon){
+	uint p = get_global_id(0);
+	int i;
+	float limSup,limInf;	
+	float L = (float)(tamanoCelda * numeroMallas);
+	fuerzaParticulaIon[p] = 0;
+	campoElectricoIon[p] = 0;
+	limInf = tamanoCelda/2;
+	limSup = (3*tamanoCelda)/2;
+	if(xIon[p] < tamanoCelda/2 || xIon[p] > (L-(tamanoCelda/2))){
+		campoElectricoIon[p]= (campoElectrico[0]+campoElectrico[numeroMallas-1]);
+	}
+	else {
+		for(i = 0; i < numeroMallas - 1 ; i++){
+			if(funcionPeso2(limInf,limSup,xIon[p]) == 1){			
+				campoElectricoIon[p]=(campoElectrico[i]+campoElectrico[i+1]);
+			}
+			limInf = limSup;
+			limSup = limSup+tamanoCelda;
+		}
+	}
+	fuerzaParticulaIon[p] = campoElectricoIon[p]*(xita*xita);
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////FuerzaParticulaIon////////////////////////////////////////////////////////////////////////
+__kernel void calculoFuerzaParticulaElectron(int numeroMallas, float tamanoCelda, float xita, __global float *campoElectrico, 
+										__global float *xElectron, __global float *campoElectricoElectron, __global float *fuerzaParticulaElectron){
+	uint p = get_global_id(0);
+	int i;
+	float limSup,limInf;	
+	float L = (float)(tamanoCelda * numeroMallas);
+	fuerzaParticulaElectron[p] = 0;
+	campoElectricoElectron[p] = 0;
+	limInf = tamanoCelda/2;
+	limSup = (3*tamanoCelda)/2;
+	if(xElectron[p] < tamanoCelda/2 || xElectron[p] > (L-(tamanoCelda/2))){
+		campoElectricoElectron[p]= (campoElectrico[0]+campoElectrico[numeroMallas-1]);
+	}
+	else {
+		for(i = 0; i < numeroMallas - 1 ; i++){
+			if(funcionPeso2(limInf,limSup,xElectron[p]) == 1){			
+				campoElectricoElectron[p]=(campoElectrico[i]+campoElectrico[i+1]);
+			}
+			limInf = limSup;
+			limSup = limSup+tamanoCelda;
+		}
+	}
+	fuerzaParticulaElectron[p] = campoElectricoElectron[p]*(xita*xita)*(-198000);
+}
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////////////////ActualizacionVelocidadPosicion////////////////////////////////////////////////////////////////////////////////
+__kernel void actualizacionVelocidadPosicion(float pasoTiempo, int numeroMallas, float tamanoCelda, __global float *xIon, __global float *xElectron,
+	 __global float *fuerzaParticulaIon, __global float *fuerzaParticulaElectron,__global int *vectorContadorIon,
+	 __global int *vectorContadorElectron, __global float *velocidadParticulaIon, __global float *velocidadParticulaElectron){	
+	 
+	uint p = get_global_id(0);
+	float maxTamano = (float)(numeroMallas*tamanoCelda);
+	
+	velocidadParticulaIon[p] = velocidadParticulaIon[p] + (((fuerzaParticulaIon[p])*pasoTiempo));
+	velocidadParticulaElectron[p] = velocidadParticulaElectron[p] + (((fuerzaParticulaElectron[p])*pasoTiempo));
+	
+	xIon[p]= xIon[p]+(velocidadParticulaIon[p]*pasoTiempo);
+	xElectron[p] = xElectron[p] + (velocidadParticulaElectron[p]*pasoTiempo);
+	
+	if(xIon[p] > maxTamano){
+		vectorContadorIon[p]++;
+		xIon[p] = xIon[p] - maxTamano;
+	}
+	else{
+		if(xIon[p]<0){
+			xIon[p] = maxTamano - xIon[p];
+		}
+	}
+	if(xElectron[p] > maxTamano){
+		vectorContadorElectron[p]++;
+		xElectron[p] = xElectron[p] - maxTamano;
+
+	}
+	else{
+		if(xElectron[p] < 0){
+			vectorContadorElectron[p]=0;
+			xElectron[p]=-xElectron[p];
+			velocidadParticulaElectron[p]=-velocidadParticulaElectron[p];
+		}
+	}
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
